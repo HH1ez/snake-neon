@@ -1,0 +1,15 @@
+{
+  "name": "Змейка Неон",
+  "short_name": "Змейка",
+  "description": "Классическая змейка в неоновом стиле. Собирай яблоки, уворачивайся от стен, играй на разных картах.",
+  "version": "1.0.0",
+  "orientation": "landscape",
+  "lang": "ru",
+  "icons": [
+    {
+      "src": "icon.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

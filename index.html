@@ -1,0 +1,1420 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Змейка Неон</title>
+<script src="/sdk.js"></script>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    width:100%; height:100%;
+    overflow:hidden;
+    background:#05010f;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    touch-action:none;
+    -webkit-user-select:none;
+    user-select:none;
+    -webkit-tap-highlight-color:transparent;
+  }
+  #game-wrapper {
+    position:fixed;
+    inset:0;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:#05010f;
+  }
+  canvas {
+    display:block;
+    width:auto;
+    height:auto;
+    max-width:100%;
+    max-height:100%;
+    /* сохраняем пропорции канваса (600:620) */
+    aspect-ratio: 600 / 620;
+    touch-action:none;
+  }
+  /* Экран «поверни телефон» */
+  #rotate-overlay {
+    position:fixed;
+    inset:0;
+    background:linear-gradient(135deg, #05010f 0%, #1a0b3d 100%);
+    display:none;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    gap:24px;
+    z-index:9999;
+    color:#fff;
+    text-align:center;
+    padding:24px;
+  }
+  #rotate-overlay.show { display:flex; }
+  #rotate-overlay .icon {
+    width:80px; height:80px;
+    border:3px solid #00e5ff;
+    border-radius:16px;
+    position:relative;
+    animation: rotate-anim 2s ease-in-out infinite;
+    box-shadow: 0 0 30px rgba(0, 229, 255, 0.6);
+  }
+  #rotate-overlay .icon::after {
+    content:'';
+    position:absolute;
+    top:6px; left:6px; right:6px; bottom:6px;
+    background:linear-gradient(180deg, #00e5ff 0%, #a855f7 100%);
+    border-radius:10px;
+    opacity:0.4;
+  }
+  @keyframes rotate-anim {
+    0%, 100% { transform: rotate(0deg); }
+    50% { transform: rotate(90deg); }
+  }
+  #rotate-overlay h2 {
+    font-size:24px;
+    font-weight:700;
+    color:#fff;
+    text-shadow: 0 0 15px rgba(0, 229, 255, 0.8);
+  }
+  #rotate-overlay p {
+    font-size:16px;
+    opacity:0.7;
+    max-width:280px;
+    line-height:1.5;
+  }
+</style>
+</head>
+<body>
+<div id="game-wrapper">
+  <canvas id="c" width="600" height="620"></canvas>
+</div>
+
+<div id="rotate-overlay">
+  <div class="icon"></div>
+  <h2>Поверните телефон</h2>
+  <p>Игра работает только в горизонтальном положении экрана</p>
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  // ==================== ОПРЕДЕЛЕНИЕ ОРИЕНТАЦИИ ====================
+  var rotateOverlay = document.getElementById('rotate-overlay');
+  var isPortrait = false;
+
+  function checkOrientation() {
+    var w = window.innerWidth;
+    var h = window.innerHeight;
+    var portrait = h > w;
+    // На ПК не показываем (экран всегда шире)
+    var isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+    var show = portrait && isTouchDevice;
+    if (show !== isPortrait) {
+      isPortrait = show;
+      if (show) {
+        rotateOverlay.classList.add('show');
+      } else {
+        rotateOverlay.classList.remove('show');
+      }
+    }
+  }
+  window.addEventListener('resize', checkOrientation);
+  window.addEventListener('orientationchange', function() {
+    setTimeout(checkOrientation, 100);
+  });
+  checkOrientation();
+
+  // ==================== YANDEX GAMES SDK ====================
+  var ysdk = null;
+  var player = null;
+
+  (function initSDK() {
+    if (typeof YaGames === 'undefined') {
+      console.log('Yandex SDK not found — local mode');
+      return;
+    }
+    YaGames.init().then(function(sdk) {
+      ysdk = sdk;
+      console.log('Yandex SDK initialized');
+      return ysdk.getPlayer({ scopes: false });
+    }).then(function(p) {
+      player = p;
+      return player.getData(['snakeBest']);
+    }).then(function(data) {
+      if (data && typeof data.snakeBest === 'number') {
+        best = data.snakeBest;
+      }
+    }).catch(function(err) {
+      console.log('SDK error:', err);
+    });
+  })();
+
+  function saveCloudSave() {
+    if (!player || !player.setData) return;
+    try {
+      player.setData({ snakeBest: best }).catch(function(){});
+    } catch (e) {}
+  }
+
+  // ==================== ОСНОВНОЕ ====================
+  var canvas = document.getElementById('c');
+  var ctx = canvas.getContext('2d');
+  var SIZE = 600;
+  var CANVAS_H = 620;
+  var CELL = 20;
+  var COLS = SIZE / CELL;
+  var FIELD_TOP = 0;
+  var FIELD_BOTTOM = 460;
+  var FIELD_LEFT = 0;
+  var FIELD_RIGHT = 600;
+
+  var screen = 'menu';
+  var menuOpen = false;
+
+  // ==================== СКОРОСТИ ====================
+  var SPEEDS = [
+    {name: 'Очень медленно', delay: 220},
+    {name: 'Медленно',       delay: 170},
+    {name: 'Нормально',      delay: 130},
+    {name: 'Быстро',         delay: 95},
+    {name: 'Очень быстро',   delay: 65}
+  ];
+  var speedIndex = 2;
+
+  // ==================== МУЗЫКА ====================
+  var musicEnabled = true;
+  var musicGain = null;
+  var musicPlaying = false;
+  var musicNoteIndex = 0;
+  var musicNextTime = 0;
+  var MELODY = [
+    261.63, 329.63, 392.00, 523.25, 392.00, 329.63,
+    293.66, 349.23, 440.00, 587.33, 440.00, 349.23,
+    329.63, 392.00, 493.88, 659.25, 493.88, 392.00,
+    349.23, 440.00, 523.25, 698.46, 523.25, 440.00
+  ];
+  var BASS = [130.81, 130.81, 146.83, 146.83, 164.81, 164.81, 174.61, 174.61];
+  var MELODY_TEMPO = 0.32;
+
+  function ensureAudio() {
+    if (audioCtx) return;
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      audioCtx = new AC();
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+    } catch (e) {}
+  }
+  function initMusic() {
+    if (musicGain) return;
+    ensureAudio();
+    if (!audioCtx) return;
+    try {
+      musicGain = audioCtx.createGain();
+      musicGain.gain.value = musicEnabled ? 0.06 : 0;
+      musicGain.connect(audioCtx.destination);
+      musicPlaying = true;
+      musicNoteIndex = 0;
+      musicNextTime = audioCtx.currentTime + 0.1;
+      scheduleMusic();
+    } catch (e) {}
+  }
+  function scheduleMusic() {
+    if (!audioCtx || !musicPlaying) return;
+    var lookahead = 0.5;
+    while (musicNextTime < audioCtx.currentTime + lookahead) {
+      playMusicNote(musicNoteIndex, musicNextTime);
+      musicNoteIndex++;
+      musicNextTime += MELODY_TEMPO;
+    }
+    setTimeout(scheduleMusic, 200);
+  }
+  function playMusicNote(idx, time) {
+    if (!musicEnabled) return;
+    try {
+      var f = MELODY[idx % MELODY.length];
+      var o = audioCtx.createOscillator();
+      var g = audioCtx.createGain();
+      o.type = 'triangle';
+      o.frequency.value = f;
+      g.gain.setValueAtTime(0, time);
+      g.gain.linearRampToValueAtTime(0.5, time + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.01, time + MELODY_TEMPO * 0.9);
+      o.connect(g); g.connect(musicGain);
+      o.start(time); o.stop(time + MELODY_TEMPO);
+      if (idx % 3 === 0) {
+        var bf = BASS[Math.floor(idx / 3) % BASS.length];
+        var bo = audioCtx.createOscillator();
+        var bg = audioCtx.createGain();
+        bo.type = 'sine';
+        bo.frequency.value = bf / 2;
+        bg.gain.setValueAtTime(0, time);
+        bg.gain.linearRampToValueAtTime(0.4, time + 0.02);
+        bg.gain.exponentialRampToValueAtTime(0.01, time + MELODY_TEMPO * 2);
+        bo.connect(bg); bg.connect(musicGain);
+        bo.start(time); bo.stop(time + MELODY_TEMPO * 2);
+      }
+    } catch (e) {}
+  }
+  function toggleMusic() {
+    musicEnabled = !musicEnabled;
+    if (musicGain) musicGain.gain.value = musicEnabled ? 0.06 : 0;
+    if (musicEnabled && !musicPlaying) initMusic();
+    return musicEnabled;
+  }
+
+  // ==================== КАРТЫ ====================
+  var MAP_COLS = 30;
+  var MAP_ROWS = 23;
+  function rep(s, n) { var r = ''; for (var i = 0; i < n; i++) r += s; return r; }
+  function emptyGrid() { var m = []; for (var y = 0; y < MAP_ROWS; y++) m.push(rep('.', MAP_COLS)); return m; }
+  function setWall(m, x, y) {
+    if (y < 0 || y >= MAP_ROWS || x < 0 || x >= MAP_COLS) return;
+    m[y] = m[y].substring(0, x) + '#' + m[y].substring(x + 1);
+  }
+  function makeEmptyMap() { return {grid: emptyGrid(), wrap: {x: false, y: false}, portals: []}; }
+  function makeCrossMap() {
+    var m = emptyGrid();
+    for (var x = 10; x < MAP_COLS - 8; x++) { setWall(m, x, 11); setWall(m, x, 12); }
+    for (var y = 4; y < MAP_ROWS - 4; y++) { setWall(m, 14, y); setWall(m, 15, y); setWall(m, 16, y); }
+    return {grid: m, wrap: {x: false, y: false}, portals: []};
+  }
+  function makeMazeMap() {
+    var m = emptyGrid();
+    var rows = [5, 11, 17];
+    for (var i = 0; i < rows.length; i++) {
+      var y = rows[i];
+      for (var x = 6; x < MAP_COLS - 6; x++) if ((x - 6) % 8 < 5) setWall(m, x, y);
+    }
+    return {grid: m, wrap: {x: false, y: false}, portals: []};
+  }
+  function makeFrameMap() {
+    var m = emptyGrid();
+    for (var x = 0; x < MAP_COLS; x++) { setWall(m, x, 0); setWall(m, x, MAP_ROWS - 1); }
+    for (var y = 0; y < MAP_ROWS; y++) { setWall(m, 0, y); setWall(m, MAP_COLS - 1, y); }
+    var x1 = 7, x2 = MAP_COLS - 8, y1 = 6, y2 = MAP_ROWS - 7;
+    for (var x2i = x1; x2i <= x2; x2i++) { setWall(m, x2i, y1); setWall(m, x2i, y2); }
+    for (var y2i = y1; y2i <= y2; y2i++) { setWall(m, x1, y2i); setWall(m, x2, y2i); }
+    var holes = [
+      {x: x1, y: Math.floor(MAP_ROWS / 2)},
+      {x: x2, y: Math.floor(MAP_ROWS / 2)},
+      {x: Math.floor(MAP_COLS / 2), y: y1},
+      {x: Math.floor(MAP_COLS / 2), y: y2}
+    ];
+    for (var h = 0; h < holes.length; h++) {
+      var hx = holes[h].x, hy = holes[h].y;
+      m[hy] = m[hy].substring(0, hx) + '.' + m[hy].substring(hx + 1);
+      if (h === 0 || h === 1) {
+        m[hy - 1] = m[hy - 1].substring(0, hx) + '.' + m[hy - 1].substring(hx + 1);
+        m[hy + 1] = m[hy + 1].substring(0, hx) + '.' + m[hy + 1].substring(hx + 1);
+      } else {
+        m[hy] = m[hy].substring(0, Math.max(0, hx - 1)) + '..' + m[hy].substring(hx + 1);
+      }
+    }
+    for (var sy = 10; sy <= 13; sy++) m[sy] = '.' + m[sy].substring(1);
+    return {grid: m, wrap: {x: false, y: false}, portals: []};
+  }
+  function makeTunnelMap() {
+    var m = emptyGrid();
+    for (var x = 0; x < MAP_COLS; x++) if (x % 6 !== 3) { setWall(m, x, 4); setWall(m, x, MAP_ROWS - 5); }
+    for (var y = 8; y < MAP_ROWS - 8; y += 6) {
+      setWall(m, 9, y); setWall(m, 9, y + 1);
+      setWall(m, 20, y); setWall(m, 20, y + 1);
+    }
+    return {grid: m, wrap: {x: true, y: false}, portals: []};
+  }
+  function makeWellMap() {
+    var m = emptyGrid();
+    for (var y = 0; y < MAP_ROWS; y++) if (y % 6 !== 3) { setWall(m, 9, y); setWall(m, MAP_COLS - 10, y); }
+    for (var x = 12; x < MAP_COLS - 12; x += 6) {
+      setWall(m, x, 7); setWall(m, x + 1, 7);
+      setWall(m, x, MAP_ROWS - 8); setWall(m, x + 1, MAP_ROWS - 8);
+    }
+    return {grid: m, wrap: {x: false, y: true}, portals: []};
+  }
+  function makePortalsMap() {
+    var m = emptyGrid();
+    for (var y = 4; y < 8; y++) {
+      for (var x = 4; x < 8; x++) setWall(m, x, y);
+      for (var x2 = MAP_COLS - 8; x2 < MAP_COLS - 4; x2++) setWall(m, x2, y);
+    }
+    for (var y2 = MAP_ROWS - 8; y2 < MAP_ROWS - 4; y2++) {
+      for (var x3 = 4; x3 < 8; x3++) setWall(m, x3, y2);
+      for (var x4 = MAP_COLS - 8; x4 < MAP_COLS - 4; x4++) setWall(m, x4, y2);
+    }
+    var portals = [
+      {x: 3, y: 12, pair: 1}, {x: MAP_COLS - 4, y: 12, pair: 1},
+      {x: Math.floor(MAP_COLS/2), y: 3, pair: 2}, {x: Math.floor(MAP_COLS/2), y: MAP_ROWS - 4, pair: 2}
+    ];
+    return {grid: m, wrap: {x: false, y: false}, portals: portals};
+  }
+
+  var builtinMaps = {
+    'Пустая':       makeEmptyMap(),
+    'Крест':        makeCrossMap(),
+    'Лабиринт':     makeMazeMap(),
+    'Рамка':        makeFrameMap(),
+    'Тоннель 🌀':   makeTunnelMap(),
+    'Колодец 🌀':   makeWellMap(),
+    'Порталы 🔵':   makePortalsMap()
+  };
+  var builtinOrder = ['Пустая', 'Крест', 'Лабиринт', 'Рамка', 'Тоннель 🌀', 'Колодец 🌀', 'Порталы 🔵'];
+
+  var customMaps = {};
+  try { if (window.__mySnakeMaps) customMaps = window.__mySnakeMaps; } catch (e) {}
+  function saveCustomMaps() { try { window.__mySnakeMaps = customMaps; } catch (e) {} }
+
+  var activeMapName = 'Пустая';
+  var currentMapIndex = 0;
+
+  function getMapByName(name) {
+    if (customMaps[name]) return customMaps[name];
+    if (builtinMaps[name]) return builtinMaps[name];
+    return builtinMaps['Пустая'];
+  }
+  var mapList = [];
+  function rebuildMapList() {
+    var newList = [];
+    var seen = {};
+    for (var i = 0; i < builtinOrder.length; i++) {
+      var k = builtinOrder[i];
+      if (builtinMaps[k] && !seen[k]) { newList.push(k); seen[k] = true; }
+    }
+    var customKeys = [];
+    for (var c in customMaps) if (customMaps.hasOwnProperty(c) && !seen[c]) { customKeys.push(c); seen[c] = true; }
+    customKeys.sort();
+    for (var j = 0; j < customKeys.length; j++) newList.push(customKeys[j]);
+    mapList = newList;
+    var idx = mapList.indexOf(activeMapName);
+    if (idx === -1) { currentMapIndex = 0; activeMapName = mapList[0] || 'Пустая'; }
+    else currentMapIndex = idx;
+  }
+  rebuildMapList();
+  function setMapByIndex(idx) {
+    if (mapList.length === 0) return;
+    idx = ((idx % mapList.length) + mapList.length) % mapList.length;
+    currentMapIndex = idx;
+    activeMapName = mapList[idx];
+  }
+  function cycleMap() { setMapByIndex(currentMapIndex + 1); }
+  function cycleMapBack() { setMapByIndex(currentMapIndex - 1); }
+
+  // ==================== РЕДАКТОР ====================
+  var editorGrid = [];
+  var editorName = 'Моя карта';
+  var editorWrapX = false;
+  var editorWrapY = false;
+  var editorPortals = [];
+  var editorPortalMode = 0;
+  function editorFromMap(mapObj) {
+    var grid = mapObj.grid || mapObj;
+    editorGrid = [];
+    for (var y = 0; y < MAP_ROWS; y++) {
+      var row = [];
+      for (var x = 0; x < MAP_COLS; x++) row.push(grid[y] && grid[y][x] === '#' ? 1 : 0);
+      editorGrid.push(row);
+    }
+    editorWrapX = mapObj.wrap ? !!mapObj.wrap.x : false;
+    editorWrapY = mapObj.wrap ? !!mapObj.wrap.y : false;
+    editorPortals = [];
+    if (mapObj.portals) for (var i = 0; i < mapObj.portals.length; i++) {
+      editorPortals.push({x: mapObj.portals[i].x, y: mapObj.portals[i].y, pair: mapObj.portals[i].pair});
+    }
+  }
+  function editorToMap() {
+    var m = [];
+    for (var y = 0; y < MAP_ROWS; y++) {
+      var row = '';
+      for (var x = 0; x < MAP_COLS; x++) row += editorGrid[y][x] ? '#' : '.';
+      m.push(row);
+    }
+    var portals = [];
+    for (var i = 0; i < editorPortals.length; i++) portals.push({x: editorPortals[i].x, y: editorPortals[i].y, pair: editorPortals[i].pair});
+    return {grid: m, wrap: {x: editorWrapX, y: editorWrapY}, portals: portals};
+  }
+  function clearEditor() { editorFromMap({grid: emptyGrid(), wrap: {x: false, y: false}, portals: []}); }
+
+  // ==================== ЗВУК ====================
+  var audioCtx = null;
+  function beep(freq, dur, type) {
+    dur = dur || 0.08; type = type || 'square';
+    try {
+      ensureAudio();
+      if (!audioCtx) return;
+      var o = audioCtx.createOscillator();
+      var g = audioCtx.createGain();
+      o.type = type; o.frequency.value = freq;
+      g.gain.setValueAtTime(0.05, audioCtx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(); o.stop(audioCtx.currentTime + dur);
+    } catch (e) {}
+  }
+
+  // ==================== ЧАСТИЦЫ ====================
+  var particles = [];
+  function spawnParticles(x, y, color, count, speed, size) {
+    count = count || 8; speed = speed || 3; size = size || 3;
+    for (var i = 0; i < count; i++) {
+      var a = Math.random() * Math.PI * 2;
+      var s = Math.random() * speed + 0.5;
+      particles.push({x: x, y: y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 1, color: color, size: size * (0.5 + Math.random())});
+    }
+  }
+  function updateParticles() {
+    for (var i = particles.length - 1; i >= 0; i--) {
+      var p = particles[i];
+      p.x += p.vx; p.y += p.vy;
+      p.vy += 0.12; p.vx *= 0.97;
+      p.life -= 0.025;
+      if (p.life <= 0) particles.splice(i, 1);
+    }
+  }
+  function drawParticles() {
+    for (var i = 0; i < particles.length; i++) {
+      var p = particles[i];
+      ctx.save();
+      ctx.globalAlpha = p.life;
+      ctx.shadowColor = p.color; ctx.shadowBlur = 10;
+      ctx.fillStyle = p.color;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  var shakeAmount = 0;
+  function shake(amount) { shakeAmount = Math.max(shakeAmount, amount); }
+  var renderSnake = [];
+  function initRenderSnake() {
+    renderSnake = [];
+    for (var i = 0; i < snake.length; i++) renderSnake.push({x: snake[i].x * CELL, y: snake[i].y * CELL});
+  }
+  function updateRenderSnake() {
+    var lerp = 0.35;
+    while (renderSnake.length < snake.length) {
+      var last = renderSnake[renderSnake.length - 1] || {x: snake[snake.length-1].x * CELL, y: snake[snake.length-1].y * CELL};
+      renderSnake.push({x: last.x, y: last.y});
+    }
+    while (renderSnake.length > snake.length) renderSnake.pop();
+    for (var i = 0; i < snake.length; i++) {
+      var tx = snake[i].x * CELL, ty = snake[i].y * CELL;
+      renderSnake[i].x += (tx - renderSnake[i].x) * lerp;
+      renderSnake[i].y += (ty - renderSnake[i].y) * lerp;
+    }
+  }
+
+  // ==================== ИГРА ====================
+  var snake, dir, nextDir, food, score, best = 0, dead, speed, walls;
+  var wrapX = false, wrapY = false;
+  var activePortals = [];
+  var goldenFood = null, scoreToNextGolden = 5, applesEaten = 0;
+  var GOLDEN_LIFETIME_MS = 8000;
+  var shieldUntil = 0, shieldActive = false, lastPortalUse = 0;
+  var foodPulse = 0;
+
+  function isWall(x, y) {
+    if (wrapX) { while (x < 0) x += MAP_COLS; while (x >= MAP_COLS) x -= MAP_COLS; }
+    if (wrapY) { while (y < 0) y += MAP_ROWS; while (y >= MAP_ROWS) y -= MAP_ROWS; }
+    if (y < 0 || y >= MAP_ROWS) return false;
+    if (x < 0 || x >= MAP_COLS) return false;
+    if (!walls) return false;
+    return walls[y][x] === '#';
+  }
+  function normalize(x, y) {
+    var nx = x, ny = y;
+    if (wrapX) { while (nx < 0) nx += MAP_COLS; while (nx >= MAP_COLS) nx -= MAP_COLS; }
+    if (wrapY) { while (ny < 0) ny += MAP_ROWS; while (ny >= MAP_ROWS) ny -= MAP_ROWS; }
+    return {x: nx, y: ny};
+  }
+  function findPortalAt(x, y) {
+    for (var i = 0; i < activePortals.length; i++) if (activePortals[i].x === x && activePortals[i].y === y) return activePortals[i];
+    return null;
+  }
+  function findPairedPortal(portal) {
+    for (var i = 0; i < activePortals.length; i++) {
+      var p = activePortals[i];
+      if (p.pair === portal.pair && (p.x !== portal.x || p.y !== portal.y)) return p;
+    }
+    return null;
+  }
+  function findFreeCell(avoidNearHead) {
+    var free = [];
+    for (var x = 0; x < MAP_COLS; x++) {
+      for (var y = 0; y < MAP_ROWS; y++) {
+        if (isWall(x, y)) continue;
+        if (findPortalAt(x, y)) continue;
+        var busy = false;
+        for (var i = 0; i < snake.length; i++) if (snake[i].x === x && snake[i].y === y) { busy = true; break; }
+        if (busy) continue;
+        if (food && food.x === x && food.y === y) continue;
+        if (goldenFood && goldenFood.x === x && goldenFood.y === y) continue;
+        if (avoidNearHead) {
+          var dx = Math.abs(x - snake[0].x), dy = Math.abs(y - snake[0].y);
+          if (dx + dy < 4) continue;
+        }
+        free.push({x: x, y: y});
+      }
+    }
+    if (free.length === 0) return null;
+    return free[Math.floor(Math.random() * free.length)];
+  }
+  function placeFood() {
+    var pos = findFreeCell(true);
+    if (!pos) { dead = true; screen = 'dead'; return; }
+    food = pos; foodPulse = 0;
+  }
+  function placeGoldenFood() {
+    var pos = findFreeCell(true);
+    if (!pos) return;
+    goldenFood = {x: pos.x, y: pos.y, expiresAt: Date.now() + GOLDEN_LIFETIME_MS};
+    beep(1200, 0.08, 'triangle');
+    setTimeout(function(){ beep(1500, 0.08, 'triangle'); }, 80);
+    setTimeout(function(){ beep(1800, 0.1, 'triangle'); }, 160);
+  }
+  function findStartPosition() {
+    var ys = []; var midY = Math.floor(MAP_ROWS / 2);
+    for (var off = 0; off < MAP_ROWS; off++) { ys.push(midY + off); ys.push(midY - off); }
+    for (var xi = 0; xi < ys.length; xi++) {
+      var y = ys[xi];
+      if (y < 2 || y >= MAP_ROWS - 2) continue;
+      for (var x = 4; x < MAP_COLS - 8; x++) {
+        var ok = true;
+        for (var dx = -2; dx < 5; dx++) if (isWall(x + dx, y) || findPortalAt(x + dx, y)) { ok = false; break; }
+        if (ok) return {x: x, y: y};
+      }
+    }
+    for (var x2 = 2; x2 < MAP_COLS - 2; x2++) {
+      for (var y2 = 2; y2 < MAP_ROWS - 2; y2++) {
+        if (!isWall(x2, y2) && !isWall(x2 - 1, y2) && !isWall(x2 - 2, y2)) return {x: x2, y: y2};
+      }
+    }
+    return {x: 5, y: Math.floor(MAP_ROWS / 2)};
+  }
+  function reset() {
+    var activeMap = getMapByName(activeMapName);
+    walls = activeMap.grid;
+    wrapX = !!activeMap.wrap.x;
+    wrapY = !!activeMap.wrap.y;
+    activePortals = activeMap.portals || [];
+    var start = findStartPosition();
+    snake = [{x: start.x, y: start.y}, {x: start.x - 1, y: start.y}, {x: start.x - 2, y: start.y}];
+    for (var i = 0; i < snake.length; i++) snake[i] = normalize(snake[i].x, snake[i].y);
+    dir = {x: 1, y: 0}; nextDir = {x: 1, y: 0};
+    score = 0; dead = false; speed = SPEEDS[speedIndex].delay;
+    lastPortalUse = 0; particles = []; shakeAmount = 0;
+    goldenFood = null; scoreToNextGolden = 5; applesEaten = 0;
+    shieldUntil = 0; shieldActive = false;
+    placeFood(); initRenderSnake();
+  }
+  function die() {
+    if (shieldActive) {
+      shieldActive = false; shieldUntil = 0;
+      beep(600, 0.15, 'sine');
+      setTimeout(function(){ beep(400, 0.15, 'sine'); }, 100);
+      var h = snake[0];
+      spawnParticles(h.x * CELL + CELL/2, h.y * CELL + CELL/2, '#64c8ff', 20, 4, 4);
+      shake(10); return false;
+    }
+    dead = true; screen = 'dead'; beep(100, 0.3);
+    var h2 = snake[0];
+    spawnParticles(h2.x * CELL + CELL/2, h2.y * CELL + CELL/2, '#ff2d95', 30, 6, 5);
+    shake(20);
+    if (score > best) {
+      best = score;
+      saveCloudSave();
+    }
+    return true;
+  }
+  function tick() {
+    if (dead) return;
+    if (shieldActive && Date.now() > shieldUntil) shieldActive = false;
+    if (goldenFood && Date.now() > goldenFood.expiresAt) { goldenFood = null; beep(300, 0.1, 'sine'); }
+    if (!(nextDir.x === -dir.x && nextDir.y === -dir.y)) {
+      if (!(nextDir.x === dir.x && nextDir.y === dir.y)) dir = nextDir;
+    }
+    var head = {x: snake[0].x + dir.x, y: snake[0].y + dir.y};
+    var outOfBounds = false;
+    if (head.x < 0 || head.x >= MAP_COLS) outOfBounds = !wrapX;
+    if (head.y < 0 || head.y >= MAP_ROWS) outOfBounds = !wrapY;
+    if (outOfBounds) { if (die()) return; return; }
+    head = normalize(head.x, head.y);
+    var portal = findPortalAt(head.x, head.y);
+    if (portal && Date.now() - lastPortalUse > 300) {
+      var paired = findPairedPortal(portal);
+      if (paired) {
+        spawnParticles(head.x * CELL + CELL/2, head.y * CELL + CELL/2, portal.pair === 1 ? '#3b82f6' : '#22c55e', 15, 4, 4);
+        head.x = paired.x; head.y = paired.y;
+        lastPortalUse = Date.now();
+        beep(800, 0.08, 'sine');
+        setTimeout(function(){ beep(1000, 0.08, 'sine'); }, 60);
+        spawnParticles(head.x * CELL + CELL/2, head.y * CELL + CELL/2, paired.pair === 1 ? '#60a5fa' : '#4ade80', 15, 4, 4);
+        head.x += dir.x; head.y += dir.y;
+        head = normalize(head.x, head.y);
+      }
+    }
+    if (isWall(head.x, head.y)) { if (die()) return; return; }
+    for (var i = 0; i < snake.length - 1; i++) {
+      if (snake[i].x === head.x && snake[i].y === head.y) { if (die()) return; return; }
+    }
+    snake.unshift(head);
+    if (goldenFood && head.x === goldenFood.x && head.y === goldenFood.y) {
+      score += 50; if (score > best) best = score;
+      goldenFood = null; shieldActive = true; shieldUntil = Date.now() + 5000;
+      spawnParticles(head.x * CELL + CELL/2, head.y * CELL + CELL/2, '#ffd700', 25, 5, 5);
+      shake(8);
+      beep(880, 0.08, 'triangle');
+      setTimeout(function(){ beep(1100, 0.08, 'triangle'); }, 80);
+      setTimeout(function(){ beep(1400, 0.15, 'triangle'); }, 160);
+    } else if (head.x === food.x && head.y === food.y) {
+      score += 10; if (score > best) best = score;
+      applesEaten++;
+      spawnParticles(head.x * CELL + CELL/2, head.y * CELL + CELL/2, '#ff2d95', 12, 3, 3);
+      beep(880, 0.06);
+      var base = SPEEDS[speedIndex].delay;
+      if (speed > 55) speed -= Math.max(1, Math.floor(base / 30));
+      placeFood();
+      if (!goldenFood && applesEaten >= scoreToNextGolden) {
+        applesEaten = 0;
+        scoreToNextGolden = 5 + Math.floor(Math.random() * 4);
+        placeGoldenFood();
+      }
+    } else snake.pop();
+  }
+  function setDir(nx, ny) {
+    if (dead || screen !== 'game' || menuOpen) return;
+    nextDir = {x: nx, y: ny};
+  }
+  function startGame() {
+    screen = 'game'; menuOpen = false;
+    ensureAudio();
+    if (!musicPlaying) initMusic();
+    reset();
+  }
+  function openEditor() {
+    screen = 'editor'; menuOpen = false;
+    editorFromMap(getMapByName(activeMapName));
+    editorName = 'Моя карта ' + (Object.keys(customMaps).length + 1);
+    editorPortalMode = 0;
+  }
+
+  document.addEventListener('keydown', function(e) {
+    var k = e.key;
+    if (k === 'ArrowUp' || k === 'w' || k === 'W' || k === 'ц' || k === 'Ц') { e.preventDefault(); ensureAudio(); setDir(0, -1); }
+    else if (k === 'ArrowDown' || k === 's' || k === 'S' || k === 'ы' || k === 'Ы') { e.preventDefault(); ensureAudio(); setDir(0, 1); }
+    else if (k === 'ArrowLeft' || k === 'a' || k === 'A' || k === 'ф' || k === 'Ф') { e.preventDefault(); ensureAudio(); setDir(-1, 0); }
+    else if (k === 'ArrowRight' || k === 'd' || k === 'D' || k === 'в' || k === 'В') { e.preventDefault(); ensureAudio(); setDir(1, 0); }
+    else if (k === ' ' && screen === 'dead') { e.preventDefault(); startGame(); }
+    else if (k === ' ') { e.preventDefault(); if (screen === 'menu') startGame(); }
+    else if (k === 'Escape') {
+      if (screen === 'game') menuOpen = !menuOpen;
+      else if (screen === 'editor' || screen === 'dead') screen = 'menu';
+    }
+  });
+
+  var arrowButtons = [], menuButtons = [], editorButtons = [];
+  var burgerButton = null, burgerMenuButtons = [];
+
+  function getCanvasPos(e) {
+    var rect = canvas.getBoundingClientRect();
+    var scaleX = canvas.width / rect.width, scaleY = canvas.height / rect.height;
+    var clientX, clientY;
+    if (e.touches && e.touches.length > 0) { clientX = e.touches[0].clientX; clientY = e.touches[0].clientY; }
+    else if (e.changedTouches && e.changedTouches.length > 0) { clientX = e.changedTouches[0].clientX; clientY = e.changedTouches[0].clientY; }
+    else { clientX = e.clientX; clientY = e.clientY; }
+    return {x: (clientX - rect.left) * scaleX, y: (clientY - rect.top) * scaleY};
+  }
+  function hitTest(pos, buttons) {
+    for (var i = 0; i < buttons.length; i++) {
+      var b = buttons[i];
+      if (pos.x >= b.x && pos.x <= b.x + b.w && pos.y >= b.y && pos.y <= b.y + b.h) return b;
+    }
+    return null;
+  }
+  function editorClickCell(gx, gy) {
+    if (editorPortalMode === 0) {
+      if (findEditorPortalAt(gx, gy)) {
+        editorPortals = editorPortals.filter(function(p) { return !(p.x === gx && p.y === gy); });
+        beep(300, 0.05); return;
+      }
+      editorGrid[gy][gx] = editorGrid[gy][gx] ? 0 : 1;
+      beep(editorGrid[gy][gx] ? 500 : 300, 0.03);
+    } else if (editorPortalMode === 1) {
+      var ex1 = findEditorPortalAt(gx, gy);
+      if (ex1) { editorPortals = editorPortals.filter(function(p) { return !(p.x === gx && p.y === gy); }); beep(300, 0.05); return; }
+      editorGrid[gy][gx] = 0;
+      var c1 = 0; for (var i = 0; i < editorPortals.length; i++) if (editorPortals[i].pair === 1) c1++;
+      if (c1 >= 2) editorPortals = editorPortals.filter(function(p) { return p.pair !== 1; });
+      editorPortals.push({x: gx, y: gy, pair: 1}); beep(700, 0.06);
+    } else {
+      var ex2 = findEditorPortalAt(gx, gy);
+      if (ex2) { editorPortals = editorPortals.filter(function(p) { return !(p.x === gx && p.y === gy); }); beep(300, 0.05); return; }
+      editorGrid[gy][gx] = 0;
+      var c2 = 0; for (var j = 0; j < editorPortals.length; j++) if (editorPortals[j].pair === 2) c2++;
+      if (c2 >= 2) editorPortals = editorPortals.filter(function(p) { return p.pair !== 2; });
+      editorPortals.push({x: gx, y: gy, pair: 2}); beep(900, 0.06);
+    }
+  }
+  function findEditorPortalAt(x, y) {
+    for (var i = 0; i < editorPortals.length; i++) if (editorPortals[i].x === x && editorPortals[i].y === y) return editorPortals[i];
+    return null;
+  }
+
+  function handleClick(pos) {
+    if (menuOpen) {
+      var mb = hitTest(pos, burgerMenuButtons);
+      if (mb) {
+        if (mb.action === 'close') { menuOpen = false; beep(500, 0.04); }
+        else if (mb.action === 'restart') { menuOpen = false; startGame(); }
+        else if (mb.action === 'toMenu') { menuOpen = false; screen = 'menu'; }
+        return;
+      }
+      return;
+    }
+    if (screen === 'menu') {
+      var btn = hitTest(pos, menuButtons);
+      if (!btn) return;
+      if (btn.action === 'play') startGame();
+      else if (btn.action === 'speed') { speedIndex = (speedIndex + 1) % SPEEDS.length; beep(600, 0.04); }
+      else if (btn.action === 'mapNext') { cycleMap(); beep(600, 0.04); }
+      else if (btn.action === 'mapPrev') { cycleMapBack(); beep(600, 0.04); }
+      else if (btn.action === 'editor') openEditor();
+      else if (btn.action === 'music') { toggleMusic(); beep(900, 0.06); }
+      return;
+    }
+    if (screen === 'editor') {
+      var btn2 = hitTest(pos, editorButtons);
+      if (btn2) {
+        if (btn2.action === 'save') {
+          if (editorName.trim() === '') editorName = 'Моя карта';
+          customMaps[editorName] = editorToMap();
+          saveCustomMaps(); rebuildMapList();
+          setMapByIndex(mapList.indexOf(editorName));
+          beep(880, 0.08); screen = 'menu';
+        } else if (btn2.action === 'clear') { clearEditor(); beep(400, 0.06); }
+        else if (btn2.action === 'back') screen = 'menu';
+        else if (btn2.action === 'wrapX') { editorWrapX = !editorWrapX; beep(600, 0.04); }
+        else if (btn2.action === 'wrapY') { editorWrapY = !editorWrapY; beep(600, 0.04); }
+        else if (btn2.action === 'mode') { editorPortalMode = (editorPortalMode + 1) % 3; beep(600, 0.04); }
+        return;
+      }
+      if (pos.y < FIELD_BOTTOM - 4 && pos.x < FIELD_RIGHT - 4 && pos.y > 50 && pos.x > 4) {
+        var gx = Math.floor(pos.x / CELL), gy = Math.floor(pos.y / CELL);
+        if (gx >= 0 && gx < MAP_COLS && gy >= 0 && gy < MAP_ROWS) editorClickCell(gx, gy);
+      }
+      return;
+    }
+    if (screen === 'game') {
+      if (burgerButton && pos.x >= burgerButton.x && pos.x <= burgerButton.x + burgerButton.w &&
+          pos.y >= burgerButton.y && pos.y <= burgerButton.y + burgerButton.h) {
+        menuOpen = true; beep(700, 0.05); return;
+      }
+      var btn3 = hitTest(pos, arrowButtons);
+      if (btn3) setDir(btn3.dx, btn3.dy);
+      return;
+    }
+    if (screen === 'dead') startGame();
+  }
+
+  function fireClick(e) {
+    if (e.cancelable) e.preventDefault();
+    ensureAudio();
+    handleClick(getCanvasPos(e));
+  }
+  if (window.PointerEvent) canvas.addEventListener('pointerdown', fireClick);
+  else {
+    canvas.addEventListener('mousedown', fireClick);
+    canvas.addEventListener('touchstart', function(e) { fireClick(e); }, {passive: false});
+  }
+
+  // ==================== СВАЙПЫ (для тача) ====================
+  var swipeStartX = 0, swipeStartY = 0, swipeActive = false;
+  canvas.addEventListener('touchstart', function(e) {
+    if (screen !== 'game' || menuOpen) return;
+    swipeActive = true;
+    swipeStartX = e.touches[0].clientX; swipeStartY = e.touches[0].clientY;
+  }, {passive: true});
+  canvas.addEventListener('touchend', function(e) {
+    if (!swipeActive) return;
+    swipeActive = false;
+    if (screen !== 'game' || menuOpen) return;
+    var dx = e.changedTouches[0].clientX - swipeStartX, dy = e.changedTouches[0].clientY - swipeStartY;
+    if (Math.abs(dx) < 25 && Math.abs(dy) < 25) return;
+    var pos = getCanvasPos(e);
+    if (hitTest(pos, arrowButtons)) return;
+    if (Math.abs(dx) > Math.abs(dy)) setDir(dx > 0 ? 1 : -1, 0);
+    else setDir(0, dy > 0 ? 1 : -1);
+  }, {passive: true});
+
+  var frame = 0;
+
+  function drawButton(b, active, bgColor, borderColor, textColor) {
+    ctx.save();
+    if (active) { ctx.shadowColor = borderColor; ctx.shadowBlur = 20; }
+    ctx.fillStyle = bgColor; ctx.strokeStyle = borderColor; ctx.lineWidth = 2;
+    var r = 10, x = b.x, y = b.y, w = b.w, h = b.h;
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    ctx.restore();
+    if (b.label) {
+      ctx.save();
+      ctx.fillStyle = textColor || '#fff';
+      ctx.font = 'bold ' + (b.font || 18) + 'px "Segoe UI", sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(b.label, x + w / 2, y + h / 2);
+      ctx.restore();
+    }
+  }
+
+  function drawArrowButton(x, y, size, direction, active) {
+    ctx.save();
+    ctx.fillStyle = active ? 'rgba(0, 229, 255, 0.45)' : 'rgba(0, 229, 255, 0.15)';
+    ctx.strokeStyle = active ? '#00e5ff' : 'rgba(0, 229, 255, 0.7)';
+    ctx.lineWidth = 2.5;
+    if (active) { ctx.shadowColor = '#00e5ff'; ctx.shadowBlur = 25; }
+    var r = 10;
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + size - r, y);
+    ctx.quadraticCurveTo(x + size, y, x + size, y + r);
+    ctx.lineTo(x + size, y + size - r);
+    ctx.quadraticCurveTo(x + size, y + size, x + size - r, y + size);
+    ctx.lineTo(x + r, y + size);
+    ctx.quadraticCurveTo(x, y + size, x, y + size - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    ctx.shadowBlur = 0;
+    var cx = x + size / 2, cy = y + size / 2;
+    var s = size * 0.32;
+    ctx.strokeStyle = active ? '#ffffff' : '#00e5ff';
+    ctx.lineWidth = 4;
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.beginPath();
+    if (direction === 'up') {
+      ctx.moveTo(cx, cy - s); ctx.lineTo(cx + s, cy + s * 0.5);
+      ctx.moveTo(cx, cy - s); ctx.lineTo(cx - s, cy + s * 0.5);
+    } else if (direction === 'down') {
+      ctx.moveTo(cx, cy + s); ctx.lineTo(cx + s, cy - s * 0.5);
+      ctx.moveTo(cx, cy + s); ctx.lineTo(cx - s, cy - s * 0.5);
+    } else if (direction === 'left') {
+      ctx.moveTo(cx - s, cy); ctx.lineTo(cx + s * 0.5, cy - s);
+      ctx.moveTo(cx - s, cy); ctx.lineTo(cx + s * 0.5, cy + s);
+    } else if (direction === 'right') {
+      ctx.moveTo(cx + s, cy); ctx.lineTo(cx - s * 0.5, cy - s);
+      ctx.moveTo(cx + s, cy); ctx.lineTo(cx - s * 0.5, cy + s);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawFieldBackground() {
+    var fieldW = FIELD_RIGHT - FIELD_LEFT, fieldH = FIELD_BOTTOM - FIELD_TOP;
+    var fieldGrad = ctx.createRadialGradient(SIZE/2, fieldH/2, 50, SIZE/2, fieldH/2, SIZE*0.7);
+    fieldGrad.addColorStop(0, 'rgba(20, 30, 80, 0.6)');
+    fieldGrad.addColorStop(1, 'rgba(60, 20, 100, 0.3)');
+    ctx.fillStyle = fieldGrad;
+    ctx.fillRect(FIELD_LEFT, FIELD_TOP, fieldW, fieldH);
+    ctx.strokeStyle = 'rgba(80, 140, 255, 0.15)';
+    ctx.lineWidth = 1;
+    for (var i = 0; i <= COLS; i++) {
+      var px = i * CELL, py = i * CELL;
+      if (px <= FIELD_RIGHT) { ctx.beginPath(); ctx.moveTo(px, FIELD_TOP); ctx.lineTo(px, FIELD_BOTTOM); ctx.stroke(); }
+      if (py <= FIELD_BOTTOM) { ctx.beginPath(); ctx.moveTo(FIELD_LEFT, py); ctx.lineTo(FIELD_RIGHT, py); ctx.stroke(); }
+    }
+    ctx.save();
+    if (wrapX || wrapY) {
+      ctx.strokeStyle = '#a855f7'; ctx.lineWidth = 3;
+      ctx.setLineDash([12, 8]);
+      ctx.shadowColor = '#a855f7'; ctx.shadowBlur = 15;
+      ctx.strokeRect(FIELD_LEFT + 3, FIELD_TOP + 3, fieldW - 6, fieldH - 6);
+      ctx.setLineDash([]);
+    } else {
+      ctx.shadowColor = '#00e5ff'; ctx.shadowBlur = 15;
+      ctx.strokeStyle = '#00e5ff'; ctx.lineWidth = 3;
+      ctx.strokeRect(FIELD_LEFT + 1.5, FIELD_TOP + 1.5, fieldW - 3, fieldH - 3);
+    }
+    ctx.restore();
+  }
+  function drawWalls(map) {
+    if (!map) return;
+    var wallPulse = 0.5 + 0.5 * Math.sin(frame * 0.06);
+    for (var y = 0; y < map.length; y++) {
+      for (var x = 0; x < map[y].length; x++) {
+        if (map[y][x] === '#') {
+          ctx.save();
+          ctx.shadowColor = '#a855f7'; ctx.shadowBlur = 6 + wallPulse * 6;
+          var wg = ctx.createLinearGradient(x * CELL, y * CELL, x * CELL, (y + 1) * CELL);
+          wg.addColorStop(0, '#9333ea'); wg.addColorStop(1, '#6b21a8');
+          ctx.fillStyle = wg;
+          ctx.fillRect(x * CELL + 1, y * CELL + 1, CELL - 2, CELL - 2);
+          ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
+          ctx.fillRect(x * CELL + 3, y * CELL + 3, CELL - 6, 2);
+          ctx.restore();
+        }
+      }
+    }
+  }
+  function drawPortal(portal) {
+    var px = portal.x * CELL + CELL/2, py = portal.y * CELL + CELL/2;
+    var pulse = 0.5 + 0.5 * Math.sin(frame * 0.15);
+    var colors = portal.pair === 1 ? {main: '#3b82f6', glow: '#60a5fa'} : {main: '#22c55e', glow: '#4ade80'};
+    ctx.save();
+    ctx.shadowColor = colors.glow; ctx.shadowBlur = 25 + pulse * 15;
+    ctx.strokeStyle = colors.glow; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(px, py, CELL * 0.5 + pulse * 2, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+    ctx.save();
+    ctx.translate(px, py); ctx.rotate(frame * 0.05);
+    var grad = ctx.createRadialGradient(0, 0, 1, 0, 0, CELL * 0.4);
+    grad.addColorStop(0, '#ffffff'); grad.addColorStop(0.5, colors.glow); grad.addColorStop(1, colors.main);
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.arc(0, 0, CELL * 0.35, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+  function drawPortals(portals) {
+    if (!portals) return;
+    for (var i = 0; i < portals.length; i++) drawPortal(portals[i]);
+  }
+  function drawEditorGrid() {
+    for (var y = 0; y < MAP_ROWS; y++) {
+      for (var x = 0; x < MAP_COLS; x++) {
+        if (editorGrid[y][x]) {
+          ctx.save();
+          ctx.shadowColor = '#a855f7'; ctx.shadowBlur = 8;
+          ctx.fillStyle = '#7e22ce';
+          ctx.fillRect(x * CELL + 1, y * CELL + 1, CELL - 2, CELL - 2);
+          ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+          ctx.fillRect(x * CELL + 3, y * CELL + 3, CELL - 6, 3);
+          ctx.restore();
+        }
+      }
+    }
+    for (var i = 0; i < editorPortals.length; i++) drawPortal(editorPortals[i]);
+  }
+  function drawGoldenFood() {
+    if (!goldenFood) return;
+    var timeLeft = Math.max(0, goldenFood.expiresAt - Date.now());
+    var ratio = timeLeft / GOLDEN_LIFETIME_MS;
+    var gx = goldenFood.x * CELL + CELL/2, gy = goldenFood.y * CELL + CELL/2;
+    var pulse2 = 0.5 + 0.5 * Math.sin(frame * 0.3);
+    ctx.save();
+    ctx.shadowColor = '#ffd700'; ctx.shadowBlur = 30 + pulse2 * 20;
+    ctx.fillStyle = '#ffd700';
+    ctx.beginPath(); ctx.arc(gx, gy, CELL/2 - 1 + pulse2 * 2, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+    ctx.save();
+    var grad = ctx.createRadialGradient(gx - 3, gy - 3, 1, gx, gy, CELL/2);
+    grad.addColorStop(0, '#fff8dc'); grad.addColorStop(1, '#ffaa00');
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.arc(gx, gy, CELL/2 - 3, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+    ctx.save();
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 14px "Segoe UI", sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('★', gx, gy + 1);
+    ctx.restore();
+    ctx.save();
+    ctx.strokeStyle = ratio > 0.3 ? '#ffd700' : '#ff2d95'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(gx, gy, CELL/2 + 4, -Math.PI/2, -Math.PI/2 + Math.PI * 2 * ratio); ctx.stroke();
+    ctx.restore();
+  }
+  function drawShieldAura() {
+    if (!shieldActive) return;
+    var head = renderSnake[0];
+    if (!head) return;
+    var hx = head.x + CELL/2, hy = head.y + CELL/2;
+    var pulse3 = 0.5 + 0.5 * Math.sin(frame * 0.2);
+    ctx.save();
+    ctx.strokeStyle = 'rgba(100, 200, 255, ' + (0.5 + pulse3 * 0.5) + ')';
+    ctx.lineWidth = 3; ctx.shadowColor = '#64c8ff'; ctx.shadowBlur = 20;
+    ctx.beginPath(); ctx.arc(hx, hy, CELL * 0.9 + pulse3 * 3, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = 'rgba(200, 240, 255, ' + (0.3 + pulse3 * 0.3) + ')';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(hx, hy, CELL * 1.2 + pulse3 * 4, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawBurgerButton() {
+    if (screen !== 'game' && screen !== 'dead') return;
+    var bx = SIZE - 56, by = 8, bw = 44, bh = 44;
+    burgerButton = {x: bx, y: by, w: bw, h: bh};
+    ctx.save();
+    ctx.fillStyle = menuOpen ? 'rgba(0, 229, 255, 0.35)' : 'rgba(0, 229, 255, 0.15)';
+    ctx.strokeStyle = 'rgba(0, 229, 255, 0.6)'; ctx.lineWidth = 2;
+    if (menuOpen) { ctx.shadowColor = '#00e5ff'; ctx.shadowBlur = 20; }
+    var r = 8;
+    ctx.beginPath();
+    ctx.moveTo(bx + r, by);
+    ctx.lineTo(bx + bw - r, by);
+    ctx.quadraticCurveTo(bx + bw, by, bx + bw, by + r);
+    ctx.lineTo(bx + bw, by + bh - r);
+    ctx.quadraticCurveTo(bx + bw, by + bh, bx + bw - r, by + bh);
+    ctx.lineTo(bx + r, by + bh);
+    ctx.quadraticCurveTo(bx, by + bh, bx, by + bh - r);
+    ctx.lineTo(bx, by + r);
+    ctx.quadraticCurveTo(bx, by, bx + r, by);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    ctx.restore();
+    ctx.save();
+    ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+    var cx1 = bx + 10, cx2 = bx + bw - 10;
+    var cy1 = by + bh / 2 - 8, cy2 = by + bh / 2, cy3 = by + bh / 2 + 8;
+    if (menuOpen) {
+      ctx.beginPath();
+      ctx.moveTo(cx1 + 4, cy1 + 2); ctx.lineTo(cx2 - 4, cy3 - 2);
+      ctx.moveTo(cx2 - 4, cy1 + 2); ctx.lineTo(cx1 + 4, cy3 - 2);
+      ctx.stroke();
+    } else {
+      ctx.beginPath();
+      ctx.moveTo(cx1, cy1); ctx.lineTo(cx2, cy1);
+      ctx.moveTo(cx1, cy2); ctx.lineTo(cx2, cy2);
+      ctx.moveTo(cx1, cy3); ctx.lineTo(cx2, cy3);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawBurgerMenu() {
+    if (!menuOpen) return;
+    var panelH = 240;
+    var panelY = 0;
+    ctx.save();
+    ctx.fillStyle = 'rgba(5, 1, 15, 0.35)';
+    ctx.fillRect(0, 0, SIZE, CANVAS_H);
+    ctx.restore();
+    ctx.save();
+    ctx.shadowColor = '#00e5ff'; ctx.shadowBlur = 30;
+    ctx.fillStyle = 'rgba(10, 5, 25, 0.72)';
+    ctx.fillRect(0, panelY, SIZE, panelH);
+    ctx.strokeStyle = 'rgba(0, 229, 255, 0.6)'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, panelY + panelH);
+    ctx.lineTo(SIZE, panelY + panelH);
+    ctx.stroke();
+    ctx.restore();
+    ctx.save();
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 26px "Segoe UI", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.shadowColor = '#00e5ff'; ctx.shadowBlur = 15;
+    ctx.fillText('ПАУЗА', SIZE/2, panelY + 38);
+    ctx.restore();
+    burgerMenuButtons = [];
+    var btnW = 380, btnH = 46;
+    var cx = SIZE / 2 - btnW / 2;
+    var startY = panelY + 65;
+    burgerMenuButtons.push({x: cx, y: startY, w: btnW, h: btnH, label: '▶  Продолжить', action: 'close', font: 18});
+    burgerMenuButtons.push({x: cx, y: startY + 56, w: btnW, h: btnH, label: '🔄  Заново', action: 'restart', font: 18});
+    burgerMenuButtons.push({x: cx, y: startY + 112, w: btnW, h: btnH, label: '🏠  В главное меню', action: 'toMenu', font: 18});
+    drawButton(burgerMenuButtons[0], true, 'rgba(34, 197, 94, 0.5)', '#22c55e', '#fff');
+    drawButton(burgerMenuButtons[1], false, 'rgba(0, 229, 255, 0.35)', '#00e5ff', '#fff');
+    drawButton(burgerMenuButtons[2], false, 'rgba(255, 45, 149, 0.35)', '#ff2d95', '#fff');
+  }
+
+  function draw() {
+    frame++;
+    ctx.fillStyle = '#05010f';
+    ctx.fillRect(0, 0, SIZE, CANVAS_H);
+
+    if (screen === 'menu') {
+      var t = frame * 0.005;
+      for (var gi = 0; gi < 3; gi++) {
+        var gg = ctx.createRadialGradient(SIZE/2 + Math.sin(t + gi) * 200, SIZE/2 + Math.cos(t * 1.3 + gi) * 200, 30, SIZE/2 + Math.sin(t + gi) * 200, SIZE/2 + Math.cos(t * 1.3 + gi) * 200, 300);
+        var colors1 = ['rgba(0,229,255,0.15)', 'rgba(168,85,247,0.15)', 'rgba(255,45,149,0.1)'];
+        gg.addColorStop(0, colors1[gi]); gg.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = gg; ctx.fillRect(0, 0, SIZE, CANVAS_H);
+      }
+      ctx.save();
+      ctx.shadowColor = '#00e5ff'; ctx.shadowBlur = 30;
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 60px "Segoe UI", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('ЗМЕЙКА', SIZE/2, 80 + Math.sin(frame * 0.06) * 4);
+      ctx.fillStyle = '#00e5ff'; ctx.font = 'bold 26px "Segoe UI", sans-serif';
+      ctx.fillText('НЕОН', SIZE/2, 112 + Math.sin(frame * 0.06 + 0.4) * 3);
+      ctx.restore();
+      for (var i = 0; i < 8; i++) {
+        var sx = 100 + i * 50;
+        var sy = 155 + Math.sin(frame * 0.08 + i * 0.5) * 12;
+        ctx.save();
+        var glowSize = 12 + Math.sin(frame * 0.1 + i * 0.3) * 6;
+        ctx.shadowColor = '#00e5ff'; ctx.shadowBlur = glowSize;
+        var t2 = i / 8;
+        ctx.fillStyle = 'rgb(' + Math.floor(100*t2) + ',' + Math.floor(200 + 55*t2) + ',255)';
+        var sz = 24 + Math.sin(frame * 0.1 + i * 0.4) * 2;
+        ctx.fillRect(sx - sz/2, sy - sz/2, sz, sz);
+        ctx.restore();
+      }
+      ctx.save();
+      ctx.textAlign = 'left'; ctx.font = '12px "Segoe UI", sans-serif';
+      var applePulse = 1 + Math.sin(frame * 0.15) * 0.15;
+      ctx.fillStyle = '#ff2d95'; ctx.shadowColor = '#ff2d95'; ctx.shadowBlur = 12;
+      ctx.beginPath(); ctx.arc(120, 210, 7 * applePulse, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.fillText('Обычное яблоко — +10', 135, 214);
+      var goldenPulse = 1 + Math.sin(frame * 0.2) * 0.2;
+      ctx.fillStyle = '#ffd700'; ctx.shadowColor = '#ffd700'; ctx.shadowBlur = 15;
+      ctx.beginPath(); ctx.arc(120, 232, 7 * goldenPulse, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = '#ffd700'; ctx.font = 'bold 10px "Segoe UI", sans-serif';
+      ctx.textAlign = 'center'; ctx.fillText('★', 120, 235);
+      ctx.textAlign = 'left'; ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '12px "Segoe UI", sans-serif';
+      ctx.fillText('Золотое — +50 и щит', 135, 236);
+      ctx.restore();
+
+      menuButtons = [];
+      var btnW = 360, btnH = 44;
+      var cx = SIZE / 2 - btnW / 2;
+      var startY = 260;
+      menuButtons.push({x: cx, y: startY, w: btnW, h: btnH, label: '▶  ИГРАТЬ', action: 'play', font: 22});
+      menuButtons.push({x: cx, y: startY + 52, w: btnW, h: btnH, label: '⚡  Скорость: ' + SPEEDS[speedIndex].name, action: 'speed', font: 15});
+      var mapBtnW = btnW - 100, mapBtnX = cx + 50;
+      menuButtons.push({x: cx, y: startY + 104, w: 40, h: btnH, label: '◀', action: 'mapPrev', font: 20});
+      menuButtons.push({x: mapBtnX, y: startY + 104, w: mapBtnW, h: btnH, label: '🗺  ' + activeMapName, action: 'mapNext', font: 15});
+      menuButtons.push({x: cx + btnW - 40, y: startY + 104, w: 40, h: btnH, label: '▶', action: 'mapNext', font: 20});
+      menuButtons.push({x: cx, y: startY + 156, w: btnW, h: btnH, label: '🎨  Редактор карт', action: 'editor', font: 16});
+      menuButtons.push({x: cx, y: startY + 208, w: btnW, h: btnH, label: musicEnabled ? '🎵  Музыка: ВКЛ' : '🔇  Музыка: ВЫКЛ', action: 'music', font: 16});
+
+      var playPulse = 0.5 + 0.5 * Math.sin(frame * 0.12);
+      drawButton(menuButtons[0], playPulse > 0.5, 'rgba(34, 197, 94, 0.25)', '#22c55e', '#fff');
+      drawButton(menuButtons[1], false, 'rgba(0, 229, 255, 0.15)', '#00e5ff', '#fff');
+      drawButton(menuButtons[2], false, 'rgba(168, 85, 247, 0.2)', '#a855f7', '#fff');
+      drawButton(menuButtons[3], false, 'rgba(168, 85, 247, 0.15)', '#a855f7', '#fff');
+      drawButton(menuButtons[4], false, 'rgba(168, 85, 247, 0.2)', '#a855f7', '#fff');
+      drawButton(menuButtons[5], false, 'rgba(255, 45, 149, 0.15)', '#ff2d95', '#fff');
+      drawButton(menuButtons[6], musicEnabled, 'rgba(255, 215, 0, 0.18)', '#ffd700', '#fff');
+
+      ctx.fillStyle = 'rgba(138, 245, 255, 0.5)'; ctx.font = '12px "Segoe UI", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('Старт: Enter / Пробел / ИГРАТЬ', SIZE/2, startY + 275);
+      ctx.fillText('Рекорд: ' + best, SIZE/2, CANVAS_H - 15);
+      return;
+    }
+
+    if (screen === 'editor') {
+      drawFieldBackground();
+      drawEditorGrid();
+      ctx.save();
+      ctx.shadowColor = '#a855f7'; ctx.shadowBlur = 15;
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 16px "Segoe UI", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('РЕДАКТОР: ' + editorName, SIZE/2, 20);
+      ctx.restore();
+      var modeText = editorPortalMode === 0 ? '✏ Стены' : (editorPortalMode === 1 ? '🔵 Портал-пара 1' : '🟢 Портал-пара 2');
+      ctx.fillStyle = 'rgba(138, 245, 255, 0.7)'; ctx.font = '11px "Segoe UI", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('Клик по клетке — поставить. Режим: ' + modeText, SIZE/2, 38);
+      editorButtons = [];
+      var bW1 = 100, bH1 = 34, gap1 = 8;
+      var totalW1 = bW1 * 4 + gap1 * 3;
+      var bx1 = SIZE / 2 - totalW1 / 2;
+      var row1Y = FIELD_BOTTOM + 8;
+      editorButtons.push({x: bx1, y: row1Y, w: bW1, h: bH1, label: '💾 Сохр.', action: 'save', font: 13});
+      editorButtons.push({x: bx1 + (bW1 + gap1), y: row1Y, w: bW1, h: bH1, label: '🗑 Очист.', action: 'clear', font: 13});
+      editorButtons.push({x: bx1 + (bW1 + gap1) * 2, y: row1Y, w: bW1, h: bH1, label: '↺ Режим', action: 'mode', font: 13});
+      editorButtons.push({x: bx1 + (bW1 + gap1) * 3, y: row1Y, w: bW1, h: bH1, label: '← Назад', action: 'back', font: 13});
+      var bW2 = 180, bH2 = 32, gap2 = 16;
+      var totalW2 = bW2 * 2 + gap2;
+      var bx2 = SIZE / 2 - totalW2 / 2;
+      var row2Y = row1Y + bH1 + 10;
+      editorButtons.push({x: bx2, y: row2Y, w: bW2, h: bH2, label: '↔ Wrap по X: ' + (editorWrapX ? 'ВКЛ' : 'выкл'), action: 'wrapX', font: 12});
+      editorButtons.push({x: bx2 + bW2 + gap2, y: row2Y, w: bW2, h: bH2, label: '↕ Wrap по Y: ' + (editorWrapY ? 'ВКЛ' : 'выкл'), action: 'wrapY', font: 12});
+      drawButton(editorButtons[0], true, 'rgba(34, 197, 94, 0.25)', '#22c55e', '#fff');
+      drawButton(editorButtons[1], false, 'rgba(255, 45, 149, 0.15)', '#ff2d95', '#fff');
+      drawButton(editorButtons[2], editorPortalMode !== 0, 'rgba(59, 130, 246, 0.25)', '#3b82f6', '#fff');
+      drawButton(editorButtons[3], false, 'rgba(0, 229, 255, 0.15)', '#00e5ff', '#fff');
+      drawButton(editorButtons[4], editorWrapX, 'rgba(168, 85, 247, 0.2)', '#a855f7', '#fff');
+      drawButton(editorButtons[5], editorWrapY, 'rgba(168, 85, 247, 0.2)', '#a855f7', '#fff');
+      return;
+    }
+
+    if (screen === 'game' || screen === 'dead') {
+      var shakeX = 0, shakeY = 0;
+      if (shakeAmount > 0.5) {
+        shakeX = (Math.random() - 0.5) * shakeAmount;
+        shakeY = (Math.random() - 0.5) * shakeAmount;
+        shakeAmount *= 0.88;
+      }
+      ctx.save();
+      ctx.translate(shakeX, shakeY);
+      drawFieldBackground();
+      drawWalls(walls);
+      drawPortals(activePortals);
+      foodPulse += 0.08;
+      if (food) {
+        var foodScale = 1 + Math.sin(foodPulse * 3) * 0.15;
+        ctx.save();
+        ctx.shadowColor = '#ff2d95'; ctx.shadowBlur = 25 + Math.sin(foodPulse * 3) * 10;
+        ctx.fillStyle = '#ff2d95';
+        ctx.beginPath();
+        ctx.arc(food.x * CELL + CELL/2, food.y * CELL + CELL/2, (CELL/2 - 2) * foodScale, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = '#fff';
+        ctx.beginPath();
+        ctx.arc(food.x * CELL + CELL/2, food.y * CELL + CELL/2, 3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+      drawGoldenFood();
+      for (var i = renderSnake.length - 1; i >= 0; i--) {
+        var s = renderSnake[i];
+        if (!snake[i]) continue;
+        var t2 = 1 - i / renderSnake.length;
+        ctx.save();
+        ctx.shadowColor = '#00e5ff'; ctx.shadowBlur = i === 0 ? 28 : 16;
+        var g2 = Math.floor(200 + 55 * t2);
+        ctx.fillStyle = 'rgb(0,' + g2 + ',255)';
+        var pad = i === 0 ? 1 : 3;
+        var size = CELL - pad * 2;
+        if (i === 0) {
+          var headPulse = 1 + Math.sin(frame * 0.2) * 0.05;
+          ctx.fillRect(s.x + pad - (size * (headPulse - 1) / 2), s.y + pad - (size * (headPulse - 1) / 2), size * headPulse, size * headPulse);
+        } else ctx.fillRect(s.x + pad, s.y + pad, size, size);
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)'; ctx.lineWidth = 1;
+        ctx.strokeRect(s.x + pad, s.y + pad, size, size);
+        ctx.restore();
+      }
+      if (renderSnake[0]) {
+        var head = renderSnake[0];
+        var cxh = head.x + CELL/2, cyh = head.y + CELL/2;
+        ctx.fillStyle = '#fff';
+        var ex1, ey1, ex2, ey2;
+        if (dir.x === 1) { ex1 = cxh + 3; ey1 = cyh - 4; ex2 = cxh + 3; ey2 = cyh + 4; }
+        else if (dir.x === -1) { ex1 = cxh - 3; ey1 = cyh - 4; ex2 = cxh - 3; ey2 = cyh + 4; }
+        else if (dir.y === -1) { ex1 = cxh - 4; ey1 = cyh - 3; ex2 = cxh + 4; ey2 = cyh - 3; }
+        else { ex1 = cxh - 4; ey1 = cyh + 3; ex2 = cxh + 4; ey2 = cyh + 3; }
+        ctx.beginPath(); ctx.arc(ex1, ey1, 2.5, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(ex2, ey2, 2.5, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#000';
+        ctx.beginPath(); ctx.arc(ex1 + dir.x, ey1 + dir.y, 1.2, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(ex2 + dir.x, ey2 + dir.y, 1.2, 0, Math.PI * 2); ctx.fill();
+      }
+      drawShieldAura();
+      drawParticles();
+      ctx.restore();
+
+      ctx.save();
+      ctx.shadowColor = '#00e5ff'; ctx.shadowBlur = 10;
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 22px "Segoe UI", sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText('ОЧКИ ' + score, 16, 30);
+      ctx.textAlign = 'right';
+      ctx.fillText('РЕКОРД ' + best, SIZE - 70, 30);
+      ctx.restore();
+      if (shieldActive) {
+        var secLeft = Math.max(0, (shieldUntil - Date.now()) / 1000).toFixed(1);
+        ctx.save();
+        ctx.shadowColor = '#64c8ff'; ctx.shadowBlur = 10;
+        ctx.fillStyle = '#64c8ff'; ctx.font = 'bold 14px "Segoe UI", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('🛡 ' + secLeft + 'с', SIZE/2, 30);
+        ctx.restore();
+      }
+
+      var grad = ctx.createLinearGradient(0, FIELD_BOTTOM, 0, CANVAS_H);
+      grad.addColorStop(0, 'rgba(5, 1, 15, 0.9)');
+      grad.addColorStop(1, 'rgba(5, 1, 15, 1)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, FIELD_BOTTOM, SIZE, CANVAS_H - FIELD_BOTTOM);
+      ctx.strokeStyle = 'rgba(0, 229, 255, 0.4)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(0, FIELD_BOTTOM); ctx.lineTo(SIZE, FIELD_BOTTOM); ctx.stroke();
+
+      var btnSize = 48, gap = 6;
+      var rowWidth = btnSize * 3 + gap * 2;
+      var rowX = (SIZE - rowWidth) / 2;
+      var rowY = FIELD_BOTTOM + 74;
+
+      var upX = rowX + btnSize + gap;
+      var upY = rowY - btnSize - gap;
+
+      arrowButtons = [
+        {x: upX, y: upY, w: btnSize, h: btnSize, dx: 0, dy: -1},
+        {x: rowX, y: rowY, w: btnSize, h: btnSize, dx: -1, dy: 0},
+        {x: rowX + btnSize + gap, y: rowY, w: btnSize, h: btnSize, dx: 0, dy: 1},
+        {x: rowX + (btnSize + gap) * 2, y: rowY, w: btnSize, h: btnSize, dx: 1, dy: 0}
+      ];
+
+      var activeUp = dir.y === -1, activeDown = dir.y === 1;
+      var activeLeft = dir.x === -1, activeRight = dir.x === 1;
+
+      drawArrowButton(arrowButtons[0].x, arrowButtons[0].y, btnSize, 'up', activeUp);
+      drawArrowButton(arrowButtons[1].x, arrowButtons[1].y, btnSize, 'left', activeLeft);
+      drawArrowButton(arrowButtons[2].x, arrowButtons[2].y, btnSize, 'down', activeDown);
+      drawArrowButton(arrowButtons[3].x, arrowButtons[3].y, btnSize, 'right', activeRight);
+
+      ctx.save();
+      ctx.fillStyle = 'rgba(138, 245, 255, 0.75)';
+      ctx.font = 'bold 12px "Segoe UI", sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText('УПРАВЛЕНИЕ:', 12, FIELD_BOTTOM + 22);
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+      ctx.font = 'bold 14px "Segoe UI", sans-serif';
+      ctx.fillText('↑ ↓ ← →', 12, FIELD_BOTTOM + 44);
+      ctx.font = '12px "Segoe UI", sans-serif';
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+      ctx.fillText('или WASD', 12, FIELD_BOTTOM + 62);
+      ctx.restore();
+
+      ctx.save();
+      ctx.fillStyle = 'rgba(138, 245, 255, 0.75)';
+      ctx.font = 'bold 12px "Segoe UI", sans-serif';
+      ctx.textAlign = 'right';
+      ctx.fillText('КАРТА: ' + activeMapName, SIZE - 16, FIELD_BOTTOM + 22);
+      ctx.fillText('СКОРОСТЬ: ' + (speedIndex + 1), SIZE - 16, FIELD_BOTTOM + 42);
+      ctx.fillStyle = musicEnabled ? 'rgba(255, 215, 0, 0.85)' : 'rgba(255, 255, 255, 0.4)';
+      ctx.fillText(musicEnabled ? '🎵 Музыка ВКЛ' : '🔇 Музыка ВЫКЛ', SIZE - 16, FIELD_BOTTOM + 62);
+      ctx.restore();
+
+      if (screen === 'dead') {
+        ctx.fillStyle = 'rgba(5, 1, 15, 0.85)';
+        ctx.fillRect(0, 0, SIZE, FIELD_BOTTOM);
+        ctx.save();
+        ctx.shadowColor = '#ff2d95'; ctx.shadowBlur = 30;
+        ctx.fillStyle = '#ff2d95'; ctx.font = 'bold 56px "Segoe UI", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('ИГРА ОКОНЧЕНА', SIZE/2, SIZE/2 - 40);
+        ctx.restore();
+        ctx.fillStyle = '#fff'; ctx.font = '28px "Segoe UI", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('Очки: ' + score, SIZE/2, SIZE/2 + 10);
+        ctx.fillStyle = '#8af5ff'; ctx.font = '18px "Segoe UI", sans-serif';
+        ctx.fillText('Клик по экрану — заново', SIZE/2, SIZE/2 + 60);
+        ctx.fillText('ESC — в меню', SIZE/2, SIZE/2 + 90);
+      }
+
+      drawBurgerButton();
+      if (menuOpen) drawBurgerMenu();
+    }
+  }
+
+  var lastTick = 0;
+  function loop(now) {
+    now = now || 0;
+    if (screen === 'game' && !dead && !menuOpen && now - lastTick > speed) {
+      lastTick = now; tick();
+    }
+    if (screen === 'game' || screen === 'dead') updateRenderSnake();
+    updateParticles();
+    draw();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
